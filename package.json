@@ -1,0 +1,62 @@
+{
+  "name": "@profullstack/affiliates",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Scarce invite codes (per-user quota, single use, who-invited-whom) plus open affiliate links with first-touch attribution. Commission math from @profullstack/referrals. Memory, SQLite (bun:sqlite, node:sqlite, better-sqlite3) and Postgres stores, plus a CLI.",
+  "keywords": [
+    "invite",
+    "invite-codes",
+    "invite-only",
+    "affiliate",
+    "referral",
+    "attribution",
+    "sqlite",
+    "postgres",
+    "profullstack"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/profullstack/affiliates.git"
+  },
+  "homepage": "https://github.com/profullstack/affiliates#readme",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "bin": {
+    "affiliates": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "rm -rf dist && tsc -p tsconfig.build.json && sed -i -E \"s#(from '\\./[a-z-]+)\\.ts'#\\1.js'#\" dist/*.d.ts && chmod +x dist/cli.js",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "node --experimental-strip-types --no-warnings --test test/*.test.ts",
+    "prepublishOnly": "npm run typecheck && npm test && npm run build"
+  },
+  "dependencies": {
+    "@profullstack/referrals": "^0.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/pg": "^8.23.1",
+    "pg": "^8.23.1",
+    "typescript": "^5.9.3"
+  },
+  "engines": {
+    "node": ">=22.13"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
