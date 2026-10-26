@@ -53,4 +53,9 @@ export interface AffiliateStore {
   /** First touch: insert only if the user has no attribution. True if inserted. */
   attribute(row: AttributionRow): Promise<boolean>;
   getAttribution(userId: string): Promise<AttributionRow | null>;
+  /**
+   * Optional: true when `code` is not one of ours but belongs to another referral system on the same
+   * site (for example an @profullstack/referrals `referral_codes` row). supabaseStore implements it.
+   */
+  isExternalCode?(code: string): Promise<boolean>;
 }

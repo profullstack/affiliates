@@ -18,6 +18,14 @@ export type RedeemInviteResult =
   | { ok: true; inviterId: string; inviteId: string }
   | { ok: false; reason: 'invalid' | 'expired' | 'used' | 'self' | 'revoked' };
 
+/** Result of `attribute`. `external: true` means the code belongs to the site's other referral system. */
+export type AttributeResult = { ok: boolean; affiliateId?: string; external?: boolean };
+
+/** A check for codes owned by another referral system: a function, or an @profullstack/referrals ReferralStore. */
+export type ExternalCodes =
+  | ((code: string) => boolean | Promise<boolean>)
+  | { getCode(code: string): Promise<unknown | null> };
+
 export interface AffiliatesOptions {
   /** Clock in ms. Default Date.now. */
   now?: () => number;
@@ -27,6 +35,13 @@ export interface AffiliatesOptions {
   inviteTtlMs?: number | null;
   /** Commission split passed to @profullstack/referrals. Default DEFAULT_SPLIT (60% affiliate, 20% customer). */
   split?: ReferralSplit;
+  /**
+   * Codes that belong to an existing referral system (sites already on @profullstack/referrals).
+   * When `attribute()` gets a code that is not ours and this says it is theirs, it returns
+   * `{ ok: false, external: true }` and records nothing, so the existing flow handles it.
+   * Default: the store's `isExternalCode` when it has one (supabaseStore checks `referral_codes`).
+   */
+  externalCodes?: ExternalCodes;
 }
 
 const DAY = 24 * 60 * 60 * 1000;
@@ -51,6 +66,7 @@ export class Affiliates {
   readonly defaultQuota: number;
   readonly inviteTtlMs: number | null;
   readonly split: ReferralSplit;
+  private readonly externalCodes: ExternalCodes | undefined;
 
   constructor(store: AffiliateStore, opts: AffiliatesOptions = {}) {
     this.store = store;
@@ -58,6 +74,19 @@ export class Affiliates {
     this.defaultQuota = opts.defaultQuota ?? 3;
     this.inviteTtlMs = opts.inviteTtlMs === undefined ? 30 * DAY : opts.inviteTtlMs;
     this.split = opts.split ?? DEFAULT_SPLIT;
+    this.externalCodes = opts.externalCodes;
+  }
+
+  /** True when `code` belongs to the site's other referral system (see `externalCodes`). */
+  async isExternalCode(code: string): Promise<boolean> {
+    const raw = String(code ?? '').trim();
+    if (!raw) return false;
+    const ext = this.externalCodes;
+    if (typeof ext === 'function') return Boolean(await ext(raw));
+    // @profullstack/referrals looks codes up upper-cased and trimmed (validateCode)
+    if (ext) return (await ext.getCode(raw.toUpperCase())) != null;
+    if (this.store.isExternalCode) return this.store.isExternalCode(raw);
+    return false;
   }
 
   private async total(userId: string): Promise<number> {
@@ -160,12 +189,17 @@ export class Affiliates {
     throw new Error('could not mint a unique affiliate code');
   }
 
-  /** First-touch attribution of a new user to the affiliate who owns `code`. Never overwrites. */
-  async attribute(code: string, newUserId: string): Promise<{ ok: boolean; affiliateId?: string }> {
+  /**
+   * First-touch attribution of a new user to the affiliate who owns `code`. Never overwrites.
+   * A code that is not ours but belongs to the site's existing referral system returns
+   * `{ ok: false, external: true }` and records nothing.
+   */
+  async attribute(code: string, newUserId: string): Promise<AttributeResult> {
     if (!code || !newUserId) return { ok: false };
     const norm = normalizeCode(code);
-    const affiliateId = await this.store.affiliateByCode(norm);
-    if (!affiliateId || affiliateId === newUserId) return { ok: false };
+    const affiliateId = norm ? await this.store.affiliateByCode(norm) : null;
+    if (!affiliateId) return (await this.isExternalCode(code)) ? { ok: false, external: true } : { ok: false };
+    if (affiliateId === newUserId) return { ok: false };
     const inserted = await this.store.attribute({ userId: newUserId, affiliateId, code: norm, at: this.now() });
     if (inserted) return { ok: true, affiliateId };
     const prior = await this.store.getAttribution(newUserId);

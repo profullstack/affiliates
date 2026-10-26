@@ -16,6 +16,8 @@ jobs:
           --health-cmd pg_isready --health-interval 2s --health-timeout 5s --health-retries 20
     env:
       AFFILIATES_TEST_PG_URL: postgres://postgres:x@127.0.0.1:5432/postgres
+      AFFILIATES_TEST_POSTGREST_URL: http://127.0.0.1:3000
+      AFFILIATES_TEST_POSTGREST_JWT_SECRET: ci-only-secret-ci-only-secret-0123456789
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -23,5 +25,15 @@ jobs:
           node-version: 24
       - run: npm ci
       - run: npm run typecheck
+      - name: PostgREST (what supabase-js talks to)
+        run: |
+          node --experimental-strip-types --no-warnings test/setup-postgrest.ts
+          docker run -d --name postgrest --network host \
+            -e PGRST_DB_URI=postgres://authenticator:auth@127.0.0.1:5432/postgres \
+            -e PGRST_DB_SCHEMAS=public -e PGRST_DB_ANON_ROLE=anon \
+            -e PGRST_JWT_SECRET=$AFFILIATES_TEST_POSTGREST_JWT_SECRET -e PGRST_SERVER_PORT=3000 \
+            postgrest/postgrest:v14.17
+          for i in $(seq 1 30); do curl -fs http://127.0.0.1:3000/ >/dev/null && break; sleep 1; done
+          curl -fsS http://127.0.0.1:3000/ >/dev/null
       - run: npm test
       - run: npm run build
