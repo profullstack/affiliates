@@ -125,6 +125,43 @@ for (const [name, make] of stores) {
       assert.equal((await aff.invitees('alice')).length, 1);
     });
 
+    test('a user who redeemed one invite is refused a second (already_invited) and it stays unused', async () => {
+      const { aff } = setup();
+      const a = await aff.createInvite('alice');
+      const b = await aff.createInvite('bob');
+      assert.equal((await aff.redeemInvite(a.code, 'carol')).ok, true);
+      assert.deepEqual(await aff.redeemInvite(b.code, 'carol'), { ok: false, reason: 'already_invited' });
+      const [bobs] = await aff.invites('bob');
+      assert.equal(bobs?.usedBy, null);
+      assert.equal(bobs?.usedAt, null);
+      assert.deepEqual(await aff.invitees('bob'), []);
+      assert.equal(await aff.invitedBy('carol'), 'alice');
+      // the same code again is plain 'used'; bob's invite still works for someone new
+      assert.deepEqual(await aff.redeemInvite(a.code, 'carol'), { ok: false, reason: 'used' });
+      assert.deepEqual(await aff.redeemInvite(b.code, 'dave'), { ok: true, inviterId: 'bob', inviteId: b.id });
+    });
+
+    test('concurrent redeems of different invites by one user: exactly one succeeds', async () => {
+      const { aff } = setup();
+      const inviters = ['i1', 'i2', 'i3', 'i4', 'i5', 'i6'];
+      const invs = await Promise.all(inviters.map((i) => aff.createInvite(i)));
+      for (let round = 0; round < 3; round++) {
+        const user = `racer${round}`;
+        const results = await Promise.all(invs.map((inv) => aff.redeemInvite(inv.code, user)));
+        const wins = results.filter((r) => r.ok);
+        if (round === 0) {
+          assert.equal(wins.length, 1, JSON.stringify(results));
+          assert.ok(results.every((r) => r.ok || r.reason === 'already_invited'), JSON.stringify(results));
+        } else {
+          // the earlier round's winner used one invite; the rest are free again for a new user
+          assert.equal(wins.length, 1, JSON.stringify(results));
+        }
+        const used = (await Promise.all(inviters.map((i) => aff.invites(i)))).flat().filter((r) => r.usedBy === user);
+        assert.equal(used.length, 1);
+        assert.equal(await aff.invitedBy(user), wins[0]?.ok ? wins[0].inviterId : null);
+      }
+    });
+
     test('redeem accepts sloppy input (case, spaces, look-alikes)', async () => {
       const { aff } = setup();
       const inv = await aff.createInvite('alice');
@@ -212,6 +249,58 @@ for (const [name, make] of stores) {
     });
   });
 }
+
+// 0.2 schema (no legacy_dup, no unique index) holding the bug: carol redeemed two invites.
+const OLD_INVITES = (t: string) => `CREATE TABLE ${t} (
+  id TEXT PRIMARY KEY, code_hash TEXT NOT NULL UNIQUE, inviter_id TEXT NOT NULL, created_at BIGINT NOT NULL,
+  expires_at BIGINT, used_by TEXT, used_at BIGINT, note TEXT NOT NULL DEFAULT '', revoked_at BIGINT)`;
+const OLD_ROWS = (t: string) => `INSERT INTO ${t} (id, code_hash, inviter_id, created_at, expires_at, used_by, used_at) VALUES
+  ('i1', 'h1', 'alice', 1, NULL, 'carol', 10),
+  ('i2', 'h2', 'bob',   1, NULL, 'carol', 20),
+  ('i3', 'h3', 'erin',  1, NULL, 'carol', 20),
+  ('i4', 'h4', 'alice', 1, NULL, 'dave',  30)`;
+
+async function checkUpgraded(aff: Affiliates, rowsOf: () => Promise<{ id: string; legacy_dup: unknown }[]>) {
+  // store operations run the upgrade on first use
+  assert.equal(await aff.invitedBy('carol'), 'alice');
+  const flags = Object.fromEntries((await rowsOf()).map((r) => [r.id, Number(r.legacy_dup)]));
+  assert.deepEqual(flags, { i1: 0, i2: 1, i3: 1, i4: 0 });
+  // history is kept: the old extra redemptions still count as used
+  assert.equal((await aff.invitees('bob'))[0]?.userId, 'carol');
+  // and from now on the rule holds for old and new users alike
+  const fresh = await aff.createInvite('frank');
+  assert.deepEqual(await aff.redeemInvite(fresh.code, 'carol'), { ok: false, reason: 'already_invited' });
+  assert.deepEqual(await aff.redeemInvite(fresh.code, 'dave'), { ok: false, reason: 'already_invited' });
+  assert.equal((await aff.redeemInvite(fresh.code, 'gina')).ok, true);
+}
+
+describe('upgrade from a 0.2 schema with duplicate redemptions', () => {
+  test('sqliteStore adds legacy_dup, marks the duplicates and the unique index on startup', async () => {
+    const db = new DatabaseSync(':memory:');
+    db.exec(OLD_INVITES('aff_invites'));
+    db.exec(OLD_ROWS('aff_invites'));
+    const aff = new Affiliates(sqliteStore(db));
+    await checkUpgraded(aff, async () => db.prepare('SELECT id, legacy_dup FROM aff_invites WHERE id LIKE ? ORDER BY id').all('i%') as any);
+    const idx = db.prepare(`SELECT sql FROM sqlite_master WHERE name = 'aff_invites_one_per_user'`).get() as any;
+    assert.match(idx.sql, /UNIQUE INDEX/);
+    // a second store on the same file is a no-op upgrade
+    const again = new Affiliates(sqliteStore(db));
+    assert.equal(await again.invitedBy('carol'), 'alice');
+  });
+
+  test('postgresStore upgrades in place', { skip: !PG_URL && 'set AFFILIATES_TEST_PG_URL' }, async () => {
+    const pool = new pg.Pool({ connectionString: PG_URL, max: 4 });
+    pools.push(pool);
+    const prefix = `u${process.pid}_${++pgSchemaN}_`;
+    await pool.query(OLD_INVITES(`${prefix}invites`));
+    await pool.query(OLD_ROWS(`${prefix}invites`));
+    const aff = new Affiliates(postgresStore(pool, { prefix }));
+    await checkUpgraded(aff, async () =>
+      (await pool.query(`SELECT id, legacy_dup FROM ${prefix}invites WHERE id LIKE 'i_' ORDER BY id`)).rows);
+    const again = new Affiliates(postgresStore(pool, { prefix }));
+    assert.equal(await again.invitedBy('carol'), 'alice');
+  });
+});
 
 describe('codes', () => {
   test('normalizeCode', () => {

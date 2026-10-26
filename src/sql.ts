@@ -67,7 +67,8 @@ export function ddl(prefix: string, dialect: Dialect = 'sqlite'): string[] {
       used_by TEXT,
       used_at BIGINT,
       note TEXT NOT NULL DEFAULT '',
-      revoked_at BIGINT
+      revoked_at BIGINT,
+      legacy_dup INTEGER NOT NULL DEFAULT 0
     )`,
     `CREATE INDEX IF NOT EXISTS ${p}invites_inviter_idx ON ${p}invites (inviter_id)`,
     `CREATE INDEX IF NOT EXISTS ${p}invites_used_by_idx ON ${p}invites (used_by)`,
@@ -91,6 +92,30 @@ export function ddl(prefix: string, dialect: Dialect = 'sqlite'): string[] {
   ];
 }
 
+/**
+ * One invite per invitee (0.3.0). Runs after `ddl()`; idempotent, so it also upgrades 0.2 tables:
+ * 1. adds `legacy_dup` (Postgres here; SQLite has no ADD COLUMN IF NOT EXISTS, sqlStore checks first),
+ * 2. marks every redemption that is not a user's first as `legacy_dup = 1` (only rows written before
+ *    0.3.0 can be such duplicates; they stay used and keep their history),
+ * 3. adds a unique index on `used_by` over the remaining rows, so a user can hold one redeemed invite.
+ */
+export function upgradeDdl(prefix: string, dialect: Dialect = 'sqlite', qualify = ''): string[] {
+  const p = checkPrefix(prefix);
+  const t = `${qualify}${p}invites`;
+  return [
+    ...(dialect === 'postgres' ? [`ALTER TABLE ${t} ADD COLUMN IF NOT EXISTS legacy_dup INTEGER NOT NULL DEFAULT 0`] : []),
+    `UPDATE ${t} SET legacy_dup = 1
+      WHERE used_by IS NOT NULL AND legacy_dup = 0 AND EXISTS (
+        SELECT 1 FROM ${t} o WHERE o.used_by = ${t}.used_by
+          AND (o.used_at < ${t}.used_at OR (o.used_at = ${t}.used_at AND o.id < ${t}.id)))`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS ${p}invites_one_per_user ON ${t} (used_by)
+      WHERE used_by IS NOT NULL AND legacy_dup = 0`,
+  ];
+}
+
+const isUniqueViolation = (err: unknown) =>
+  (err as any)?.code === '23505' || /unique|duplicate key/i.test(String((err as Error)?.message ?? err));
+
 /** Store over any SQL engine that speaks the common subset of SQLite and Postgres (RETURNING, ON CONFLICT). */
 export function sqlStore(exec: Exec, opts: SqlStoreOptions = {}, dialect: Dialect = 'sqlite'): AffiliateStore {
   const p = checkPrefix(opts.prefix ?? 'aff_');
@@ -98,6 +123,11 @@ export function sqlStore(exec: Exec, opts: SqlStoreOptions = {}, dialect: Dialec
   const init = () =>
     (ready ??= (async () => {
       for (const stmt of ddl(p, dialect)) await exec(stmt, []);
+      if (dialect === 'sqlite') {
+        const has = await exec(`SELECT 1 AS x FROM pragma_table_info('${p}invites') WHERE name = 'legacy_dup'`, []);
+        if (has.length === 0) await exec(`ALTER TABLE ${p}invites ADD COLUMN legacy_dup INTEGER NOT NULL DEFAULT 0`, []);
+      }
+      for (const stmt of upgradeDdl(p, dialect)) await exec(stmt, []);
     })().catch((err) => {
       ready = null;
       throw err;
@@ -150,12 +180,21 @@ export function sqlStore(exec: Exec, opts: SqlStoreOptions = {}, dialect: Dialec
       return rows[0] ? toInvite(rows[0]) : null;
     },
     async claimInvite(id, userId, at) {
-      const rows = await q(
-        `UPDATE ${p}invites SET used_by = $2, used_at = $3
-         WHERE id = $1 AND used_by IS NULL AND revoked_at IS NULL RETURNING id`,
-        [id, userId, at],
-      );
-      return rows.length > 0;
+      // NOT EXISTS refuses a user who already redeemed an invite; the unique index on used_by is what
+      // makes it hold when two redeems by the same user race (the loser gets a unique violation).
+      try {
+        const rows = await q(
+          `UPDATE ${p}invites SET used_by = $2, used_at = $3
+           WHERE id = $1 AND used_by IS NULL AND revoked_at IS NULL
+             AND NOT EXISTS (SELECT 1 FROM ${p}invites prior WHERE prior.used_by = $2)
+           RETURNING id`,
+          [id, userId, at],
+        );
+        return rows.length > 0;
+      } catch (err) {
+        if (isUniqueViolation(err)) return false;
+        throw err;
+      }
     },
     async revokeInvite(id, at) {
       await q(`UPDATE ${p}invites SET revoked_at = $2 WHERE id = $1 AND revoked_at IS NULL`, [id, at]);

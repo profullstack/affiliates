@@ -4,7 +4,8 @@ Scarce invite codes plus open affiliate links, for every Profullstack property.
 
 - **Invite codes** are scarce on purpose. Each user gets a small quota (default 3). Each code
   works once, expires (default 30 days), cannot be redeemed by the person who made it, and records
-  who invited whom. Codes look like `INV-7K3M-QX9D-2F8H` (60 random bits, Crockford base32) and are
+  who invited whom. Each user can be invited once: a second invite is refused (`already_invited`)
+  and stays unused, so one account cannot earn several inviters a bonus. Codes look like `INV-7K3M-QX9D-2F8H` (60 random bits, Crockford base32) and are
   stored only as sha256 hashes, so a database leak does not leak working codes.
 - **Affiliate codes** are open: one stable public code per user, unlimited use, first-touch
   attribution that is never overwritten.
@@ -35,6 +36,8 @@ invite.code;                                          // 'INV-7K3M-QX9D-2F8H' (s
 await aff.quota('user_alice');                        // { total: 3, used: 1, left: 2 }
 await aff.redeemInvite(invite.code, 'user_carol');    // { ok: true, inviterId: 'user_alice', inviteId: '...' }
 await aff.redeemInvite(invite.code, 'user_dave');     // { ok: false, reason: 'used' }
+const other = await aff.createInvite('user_bob');
+await aff.redeemInvite(other.code, 'user_carol');     // { ok: false, reason: 'already_invited' } (other stays unused)
 await aff.invitedBy('user_carol');                    // 'user_alice'
 await aff.setQuota('user_alice', 10);                 // admin: hand out more
 
@@ -59,7 +62,7 @@ For apps that only have a supabase-js client (service role key, no direct `DATAB
 operation is one `client.rpc()` call to a Postgres function, so the scarce parts are atomic in the
 database, not read-modify-write in JS: the quota check and insert run under a per-inviter advisory
 lock (the same logic as `postgresStore`'s `aff_insert_invite()`), redemption is
-`UPDATE ... WHERE used_by IS NULL`, and attribution is `INSERT ... ON CONFLICT DO NOTHING`.
+`UPDATE ... WHERE used_by IS NULL` backed by a unique index on `used_by` (one invite per user), and attribution is `INSERT ... ON CONFLICT DO NOTHING`.
 `@supabase/supabase-js` is not a dependency; anything with `rpc(fn, args) -> { data, error }` works.
 
 1. Add the migration (tables, RLS on with no policies, `SECURITY DEFINER` functions with a pinned
@@ -148,7 +151,7 @@ export type Invite = {
 };
 export type RedeemInviteResult =
   | { ok: true; inviterId: string; inviteId: string }
-  | { ok: false; reason: 'invalid' | 'expired' | 'used' | 'self' | 'revoked' };
+  | { ok: false; reason: 'invalid' | 'expired' | 'used' | 'self' | 'revoked' | 'already_invited' };
 
 export interface AffiliateStore { /* see src/store.ts: quota, invite, claim, attribution primitives */ }
 export function memoryStore(): AffiliateStore;
@@ -162,6 +165,7 @@ export function supabaseStore(
   opts?: { prefix?: string },
 ): AffiliateStore;
 export function supabaseMigrationSql(prefix?: string): string;   // = migrations/supabase.sql for 'aff_'
+export function supabaseUpgradeSql(prefix?: string): string;     // = migrations/supabase-0.3.0-upgrade.sql
 
 export const REF_COOKIE = 'referral_code';                        // @profullstack/referrals' cookie
 export const REF_PARAM = 'ref';
@@ -205,8 +209,13 @@ Semantics worth knowing:
 - **Quota under concurrency**: SQLite serializes writers, and on Postgres the check and insert run in
   a small `aff_insert_invite()` function under a per-inviter advisory lock, so parallel
   `createInvite` calls cannot overshoot.
-- **Redeem order**: `invalid`, `revoked`, `used`, `self`, `expired`. A self-redeem does not burn the
-  invite. If a user redeems two different invites, `invitedBy` returns the first inviter.
+- **One invite per invitee** (since 0.3.0): a user who already redeemed an invite gets
+  `{ ok: false, reason: 'already_invited' }` and the second invite is not touched (still unused, still
+  redeemable by someone else). It is atomic in every store: a unique index on `used_by` (memory: a
+  synchronous check), so two concurrent redeems of two different codes by the same user give exactly
+  one success. Before 0.3.0 both were used up and both inviters were credited.
+- **Redeem order**: `invalid`, `revoked`, `used`, `self`, `expired`, `already_invited`. A self-redeem
+  does not burn the invite. `invitedBy` returns the inviter of the user's first redeemed invite.
 - **normalizeCode** uppercases, drops spaces and punctuation, and maps the Crockford look-alikes
   `O` to `0` and `I`/`L` to `1`. Invite codes come back as `INV-XXXX-XXXX-XXXX` (the `INV` prefix is
   optional on input), so `inv 7k3m qx9d 2f8h` redeems.
@@ -215,6 +224,46 @@ Semantics worth knowing:
   ours but belongs to the site's @profullstack/referrals setup returns `{ ok: false, external: true }`.
 
 Tables (prefix configurable): `aff_invites`, `aff_quotas`, `aff_codes`, `aff_attributions`.
+
+## Upgrading from 0.2
+
+0.2 let one user redeem several invites, crediting every inviter. 0.3.0 refuses the second one with
+the new reason `'already_invited'` (an addition to the `RedeemInviteResult` union: a `switch` over
+`reason` with no default needs one more case). The schema gains one column and one index:
+
+- `aff_invites.legacy_dup INTEGER NOT NULL DEFAULT 0`: set to 1 on every redemption that was not a
+  user's first. Only rows written before the upgrade can be such duplicates. They stay used and keep
+  their history (`invitees` still lists them); they are only excluded from the new index.
+- `aff_invites_one_per_user`: `UNIQUE (used_by) WHERE used_by IS NOT NULL AND legacy_dup = 0`.
+
+**sqliteStore / postgresStore**: nothing to do. They run the upgrade on first use, idempotently, the
+same way they create their tables.
+
+**supabaseStore**: add one more migration. Either the delta:
+
+```sh
+cp node_modules/@profullstack/affiliates/migrations/supabase-0.3.0-upgrade.sql supabase/migrations/20261027000000_affiliates_0_3.sql
+# other prefix: node -e "import('@profullstack/affiliates').then(m => process.stdout.write(m.supabaseUpgradeSql('gc_')))" > ...
+```
+
+or the whole of `migrations/supabase.sql` again (it is idempotent and contains the same statements).
+It adds the column and index and replaces `aff_claim_invite()`; existing grants are kept.
+
+**Schema you manage yourself** (your own migrations over `aff_` tables), the SQL is:
+
+```sql
+-- Postgres (SQLite: drop "IF NOT EXISTS" from ADD COLUMN and run it only if the column is missing)
+ALTER TABLE aff_invites ADD COLUMN IF NOT EXISTS legacy_dup INTEGER NOT NULL DEFAULT 0;
+UPDATE aff_invites SET legacy_dup = 1
+  WHERE used_by IS NOT NULL AND legacy_dup = 0 AND EXISTS (
+    SELECT 1 FROM aff_invites o WHERE o.used_by = aff_invites.used_by
+      AND (o.used_at < aff_invites.used_at OR (o.used_at = aff_invites.used_at AND o.id < aff_invites.id)));
+CREATE UNIQUE INDEX IF NOT EXISTS aff_invites_one_per_user ON aff_invites (used_by)
+  WHERE used_by IS NOT NULL AND legacy_dup = 0;
+```
+
+To find accounts that took more than one invite before the upgrade (for clawing back bonuses):
+`SELECT used_by, inviter_id, used_at FROM aff_invites WHERE legacy_dup = 1`.
 
 ## CLI
 
@@ -242,7 +291,7 @@ npm test                 # node --experimental-strip-types --test (memory + node
 AFFILIATES_TEST_PG_URL=postgres://postgres:x@127.0.0.1:55432/postgres npm test   # adds real Postgres + supabaseStore over rpc()
 # adds real PostgREST too (see .github/workflows and test/setup-postgrest.ts):
 #   AFFILIATES_TEST_POSTGREST_URL=http://127.0.0.1:3000 AFFILIATES_TEST_POSTGREST_JWT_SECRET=... npm test
-npm run gen:migration    # rewrite migrations/supabase.sql after changing supabaseMigrationSql()
+npm run gen:migration    # rewrite migrations/supabase.sql + supabase-0.3.0-upgrade.sql after changing them
 npm run build            # tsc to dist/
 ```
 

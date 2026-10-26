@@ -7,7 +7,7 @@ export type { SqliteLike } from './sqlite.ts';
 export { postgresStore } from './postgres.ts';
 export type { PgLike } from './postgres.ts';
 export type { SqlStoreOptions } from './sql.ts';
-export { supabaseStore, supabaseMigrationSql } from './supabase.ts';
+export { supabaseStore, supabaseMigrationSql, supabaseUpgradeSql } from './supabase.ts';
 export type { SupabaseLike, SupabaseStoreOptions } from './supabase.ts';
 export { REF_COOKIE, REF_PARAM, refFromRequest } from './ref.ts';
 export type { RequestLike } from './ref.ts';

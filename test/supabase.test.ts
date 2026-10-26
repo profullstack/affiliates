@@ -9,6 +9,7 @@ import {
   memoryStore,
   supabaseStore,
   supabaseMigrationSql,
+  supabaseUpgradeSql,
   refFromRequest,
   REF_COOKIE,
   REF_PARAM,
@@ -75,6 +76,8 @@ describe('supabase migration', () => {
   test('migrations/supabase.sql is supabaseMigrationSql() output', () => {
     const file = readFileSync(new URL('../migrations/supabase.sql', import.meta.url), 'utf8');
     assert.equal(file, supabaseMigrationSql());
+    const up = readFileSync(new URL('../migrations/supabase-0.3.0-upgrade.sql', import.meta.url), 'utf8');
+    assert.equal(up, supabaseUpgradeSql());
   });
 
   test('every function is SECURITY DEFINER with a pinned search_path; prefix is validated', () => {
@@ -171,6 +174,42 @@ describe('supabaseStore over rpc() on real Postgres', { skip: !PG_URL && 'set AF
     assert.deepEqual(await aff.attribute(ours, 'newbie'), { ok: true, affiliateId: 'alice' });
   });
 
+  test('one invite per invitee holds under concurrent redeems through rpc()', async () => {
+    const { aff } = await make();
+    const invs = await Promise.all(['i1', 'i2', 'i3', 'i4', 'i5', 'i6', 'i7', 'i8'].map((i) => aff.createInvite(i)));
+    const results = await Promise.all(invs.map((inv) => aff.redeemInvite(inv.code, 'carol')));
+    assert.equal(results.filter((r) => r.ok).length, 1, JSON.stringify(results));
+    for (const r of results) if (!r.ok) assert.equal(r.reason, 'already_invited');
+    const used = (await Promise.all(invs.map((inv) => aff.invites(inv.inviterId)))).flat().filter((r) => r.usedBy);
+    assert.equal(used.length, 1);
+  });
+
+  for (const how of ['supabaseUpgradeSql()', 'full supabaseMigrationSql() re-run'] as const) {
+    test(`a database on 0.2's migration with duplicate redemptions upgrades via ${how}`, async () => {
+      const prefix = `sbu${process.pid}_${++n}_`;
+      const old = readFileSync(new URL('./fixtures/supabase-0.2.0.sql', import.meta.url), 'utf8').replaceAll('aff_', prefix);
+      await fakeSupabase(pool, { prefix, migrate: false }).ready; // roles
+      await pool.query(old);
+      await pool.query(`INSERT INTO public.${prefix}invites (id, code_hash, inviter_id, created_at, used_by, used_at) VALUES
+        ('i1', 'h1', 'alice', 1, 'carol', 10), ('i2', 'h2', 'bob', 1, 'carol', 20), ('i3', 'h3', 'alice', 1, 'dave', 30)`);
+      const sql = how === 'supabaseUpgradeSql()' ? supabaseUpgradeSql(prefix) : supabaseMigrationSql(prefix);
+      await pool.query(sql);
+      await pool.query(sql); // idempotent
+      const flags = await pool.query(`SELECT id, legacy_dup FROM public.${prefix}invites ORDER BY id`);
+      assert.deepEqual(flags.rows.map((r) => [r.id, r.legacy_dup]), [['i1', 0], ['i2', 1], ['i3', 0]]);
+      const aff = new Affiliates(supabaseStore(fakeSupabase(pool, { prefix, migrate: false }), { prefix }));
+      assert.equal(await aff.invitedBy('carol'), 'alice');
+      const fresh = await aff.createInvite('frank');
+      assert.deepEqual(await aff.redeemInvite(fresh.code, 'carol'), { ok: false, reason: 'already_invited' });
+      assert.equal((await aff.redeemInvite(fresh.code, 'gina')).ok, true);
+      // grants survive the function's CREATE OR REPLACE: anon still refused
+      const anon = await fakeSupabase(pool, { prefix, role: 'anon', migrate: false }).rpc(`${prefix}claim_invite`, {
+        p_id: 'x', p_user: 'y', p_at: 1,
+      });
+      assert.match(String(anon.error?.message), /permission denied/);
+    });
+  }
+
   test('anon and authenticated keys cannot call the functions or read the tables; RLS on, no policies', async () => {
     const { prefix } = await make();
     for (const role of ['anon', 'authenticated'] as const) {
@@ -266,6 +305,16 @@ describe('supabaseStore through real PostgREST', { skip: !(REST_URL && REST_SECR
     await aff.setQuota(`${run}_alice`, 5);
     assert.equal((await aff.quota(`${run}_alice`)).left, 2);
     assert.deepEqual(await aff.attribute('NOPE0000', `${run}_x`), { ok: false });
+  });
+
+  test('one user redeeming 6 invites at once gets exactly one; the rest stay unused', async () => {
+    const aff = await make();
+    const invs = await Promise.all([1, 2, 3, 4, 5, 6].map((i) => aff.createInvite(`${run}_inv${i}`)));
+    const results = await Promise.all(invs.map((inv) => aff.redeemInvite(inv.code, `${run}_carol`)));
+    assert.equal(results.filter((r) => r.ok).length, 1, JSON.stringify(results));
+    for (const r of results) if (!r.ok) assert.equal(r.reason, 'already_invited');
+    const used = (await Promise.all(invs.map((inv) => aff.invites(inv.inviterId)))).flat().filter((r) => r.usedBy);
+    assert.equal(used.length, 1);
   });
 
   test('anon key is refused', async () => {

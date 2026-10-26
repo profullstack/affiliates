@@ -43,6 +43,7 @@ export function memoryStore(): AffiliateStore {
     async claimInvite(id, userId, at) {
       const r = invites.get(id);
       if (!r || r.usedBy !== null || r.revokedAt !== null) return false;
+      for (const o of invites.values()) if (o.usedBy === userId) return false; // one invite per invitee
       r.usedBy = userId;
       r.usedAt = at;
       return true;
