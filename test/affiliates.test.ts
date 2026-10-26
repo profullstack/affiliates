@@ -7,6 +7,7 @@ import {
   memoryStore,
   sqliteStore,
   postgresStore,
+  supabaseStore,
   normalizeCode,
   buildReferralUrl,
   extractCode,
@@ -14,6 +15,7 @@ import {
 } from '../src/index.ts';
 
 import pg from 'pg';
+import { fakeSupabase, postgrestLikePool } from './fake-supabase.ts';
 
 // Real Postgres runs when AFFILIATES_TEST_PG_URL is set, e.g.
 //   docker run --rm -e POSTGRES_PASSWORD=x -p 55432:5432 postgres:16-alpine
@@ -36,7 +38,13 @@ const stores: [string, () => AffiliateStore][] = [
   ['sqlite (node:sqlite)', () => sqliteStore(new DatabaseSync(':memory:'))],
   ['sqlite custom prefix', () => sqliteStore(new DatabaseSync(':memory:'), { prefix: 'inv_' })],
 ];
-if (PG_URL) stores.push(['postgres (real)', pgStore]);
+function sbStore(): AffiliateStore {
+  const pool = postgrestLikePool(pg, PG_URL!);
+  pools.push(pool);
+  const prefix = `s${process.pid}_${++pgSchemaN}_`;
+  return supabaseStore(fakeSupabase(pool, { prefix }), { prefix });
+}
+if (PG_URL) stores.push(['postgres (real)', pgStore], ['supabase rpc (real Postgres)', sbStore]);
 
 const DAY = 86_400_000;
 
