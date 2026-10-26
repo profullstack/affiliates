@@ -16,7 +16,7 @@ export type Invite = {
 
 export type RedeemInviteResult =
   | { ok: true; inviterId: string; inviteId: string }
-  | { ok: false; reason: 'invalid' | 'expired' | 'used' | 'self' | 'revoked' };
+  | { ok: false; reason: 'invalid' | 'expired' | 'used' | 'self' | 'revoked' | 'already_invited' };
 
 /** Result of `attribute`. `external: true` means the code belongs to the site's other referral system. */
 export type AttributeResult = { ok: boolean; affiliateId?: string; external?: boolean };
@@ -139,7 +139,10 @@ export class Affiliates {
     throw new Error('could not mint a unique invite code');
   }
 
-  /** Spend an invite on a new user. Single use; the inviter cannot redeem their own. */
+  /**
+   * Spend an invite on a new user. Single use; the inviter cannot redeem their own; and a user who
+   * already redeemed an invite is refused with `already_invited` without using up the second one.
+   */
   async redeemInvite(code: string, newUserId: string): Promise<RedeemInviteResult> {
     if (!code || !newUserId) return { ok: false, reason: 'invalid' };
     const row = await this.store.getInviteByHash(hashCode(code));
@@ -149,10 +152,15 @@ export class Affiliates {
     if (row.inviterId === newUserId) return { ok: false, reason: 'self' };
     const at = this.now();
     if (row.expiresAt !== null && at >= row.expiresAt) return { ok: false, reason: 'expired' };
+    if ((await this.store.invitedBy(newUserId)) !== null) return { ok: false, reason: 'already_invited' };
     const won = await this.store.claimInvite(row.id, newUserId, at);
     if (!won) {
       const again = await this.store.getInvite(row.id);
-      return { ok: false, reason: again && again.revokedAt !== null && again.usedBy === null ? 'revoked' : 'used' };
+      if (again && again.usedBy === null) {
+        // still free, so the claim lost to this user's own concurrent redeem of another invite
+        return { ok: false, reason: again.revokedAt !== null ? 'revoked' : 'already_invited' };
+      }
+      return { ok: false, reason: 'used' };
     }
     return { ok: true, inviterId: row.inviterId, inviteId: row.id };
   }

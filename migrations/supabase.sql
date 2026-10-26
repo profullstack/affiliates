@@ -11,7 +11,8 @@ CREATE TABLE IF NOT EXISTS public.aff_invites (
   used_by TEXT,
   used_at BIGINT,
   note TEXT NOT NULL DEFAULT '',
-  revoked_at BIGINT
+  revoked_at BIGINT,
+  legacy_dup INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS aff_invites_inviter_idx ON public.aff_invites (inviter_id);
 CREATE INDEX IF NOT EXISTS aff_invites_used_by_idx ON public.aff_invites (used_by);
@@ -31,6 +32,16 @@ CREATE TABLE IF NOT EXISTS public.aff_attributions (
   at BIGINT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS aff_attributions_affiliate_idx ON public.aff_attributions (affiliate_id);
+
+-- 0.3.0: one invite per invitee. Upgrades a 0.2 database in place: earlier duplicate redemptions
+-- are kept and marked legacy_dup = 1, then a unique index allows one redeemed invite per user.
+ALTER TABLE public.aff_invites ADD COLUMN IF NOT EXISTS legacy_dup INTEGER NOT NULL DEFAULT 0;
+UPDATE public.aff_invites SET legacy_dup = 1
+  WHERE used_by IS NOT NULL AND legacy_dup = 0 AND EXISTS (
+  SELECT 1 FROM public.aff_invites o WHERE o.used_by = public.aff_invites.used_by
+  AND (o.used_at < public.aff_invites.used_at OR (o.used_at = public.aff_invites.used_at AND o.id < public.aff_invites.id)));
+CREATE UNIQUE INDEX IF NOT EXISTS aff_invites_one_per_user ON public.aff_invites (used_by)
+  WHERE used_by IS NOT NULL AND legacy_dup = 0;
 
 -- RLS on with no policies: anon and authenticated keys see nothing. Access goes only through the
 -- SECURITY DEFINER functions below, which only service_role may execute.
@@ -105,16 +116,20 @@ $fn$;
 
 CREATE OR REPLACE FUNCTION public.aff_claim_invite(p_id TEXT, p_user TEXT, p_at BIGINT)
 RETURNS BOOLEAN
-LANGUAGE sql
+LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = public, pg_temp
 AS $fn$
-WITH won AS (
+BEGIN
+  -- One invite per invitee: NOT EXISTS refuses a repeat, and the unique index aff_invites_one_per_user
+  -- turns a concurrent repeat by the same user into a unique_violation, answered as FALSE.
   UPDATE public.aff_invites SET used_by = p_user, used_at = p_at
   WHERE id = p_id AND used_by IS NULL AND revoked_at IS NULL
-  RETURNING 1
-)
-SELECT EXISTS (SELECT 1 FROM won)
+    AND NOT EXISTS (SELECT 1 FROM public.aff_invites prior WHERE prior.used_by = p_user);
+  RETURN FOUND;
+EXCEPTION WHEN unique_violation THEN
+  RETURN FALSE;
+END
 $fn$;
 
 CREATE OR REPLACE FUNCTION public.aff_revoke_invite(p_id TEXT, p_at BIGINT)

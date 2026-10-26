@@ -36,7 +36,11 @@ export interface AffiliateStore {
   insertInvite(row: InviteRow, limit: number): Promise<boolean>;
   getInviteByHash(codeHash: string): Promise<InviteRow | null>;
   getInvite(id: string): Promise<InviteRow | null>;
-  /** Atomic single use: sets used_by/used_at only where used_by IS NULL and not revoked. True if this call won. */
+  /**
+   * Atomic single use: sets used_by/used_at only where used_by IS NULL, not revoked, and `userId` has
+   * not redeemed any invite yet (one invite per invitee, enforced atomically: two concurrent claims of
+   * different invites by the same user yield one true). True if this call won.
+   */
   claimInvite(id: string, userId: string, at: number): Promise<boolean>;
   revokeInvite(id: string, at: number): Promise<void>;
   /** All invites created by the user, newest first. */
