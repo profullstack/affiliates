@@ -58,6 +58,11 @@ export interface AffiliateStore {
   attribute(row: AttributionRow): Promise<boolean>;
   getAttribution(userId: string): Promise<AttributionRow | null>;
   /**
+   * Users first-touch attributed to this affiliate, oldest first. Optional so custom stores keep
+   * working; `downline()` falls back to invitees alone without it. Every bundled store implements it.
+   */
+  attributedTo?(affiliateId: string): Promise<{ userId: string; at: number }[]>;
+  /**
    * Optional: true when `code` is not one of ours but belongs to another referral system on the same
    * site (for example an @profullstack/referrals `referral_codes` row). supabaseStore implements it.
    */

@@ -1,5 +1,6 @@
 export { Affiliates } from './affiliates.ts';
-export type { Invite, RedeemInviteResult, AffiliatesOptions, AttributeResult, ExternalCodes } from './affiliates.ts';
+export { MAX_LEVELS } from './affiliates.ts';
+export type { Invite, RedeemInviteResult, AffiliatesOptions, AttributeResult, ExternalCodes, UplineEntry, DownlineEntry, PayoutLine, Payouts } from './affiliates.ts';
 export type { AffiliateStore, InviteRow, AttributionRow } from './store.ts';
 export { memoryStore } from './memory.ts';
 export { sqliteStore } from './sqlite.ts';
@@ -7,7 +8,7 @@ export type { SqliteLike } from './sqlite.ts';
 export { postgresStore } from './postgres.ts';
 export type { PgLike } from './postgres.ts';
 export type { SqlStoreOptions } from './sql.ts';
-export { supabaseStore, supabaseMigrationSql, supabaseUpgradeSql } from './supabase.ts';
+export { supabaseStore, supabaseMigrationSql, supabaseUpgradeSql, supabaseUpgrade040Sql } from './supabase.ts';
 export type { SupabaseLike, SupabaseStoreOptions } from './supabase.ts';
 export { REF_COOKIE, REF_PARAM, refFromRequest } from './ref.ts';
 export type { RequestLike } from './ref.ts';

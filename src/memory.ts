@@ -94,5 +94,11 @@ export function memoryStore(): AffiliateStore {
       const r = attributions.get(userId);
       return r ? { ...r } : null;
     },
+    async attributedTo(affiliateId) {
+      return [...attributions.values()]
+        .filter((r) => r.affiliateId === affiliateId)
+        .sort((a, b) => a.at - b.at)
+        .map((r) => ({ userId: r.userId, at: r.at }));
+    },
   };
 }

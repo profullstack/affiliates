@@ -13,6 +13,8 @@ Scarce invite codes plus open affiliate links, for every Profullstack property.
   [`@profullstack/referrals`](https://www.npmjs.com/package/@profullstack/referrals)
   (`calculateReferral`, `DEFAULT_SPLIT` = 60% affiliate, 20% customer discount), and its
   `buildReferralUrl` / `extractCode` are re-exported.
+- **Multi-level** when you want it (0.4.0): set `levels` and `payouts()` splits each sale up the
+  buyer's upline. Leave it unset and you get one level, exactly as before.
 
 Stores: in-memory, SQLite (`bun:sqlite`, `node:sqlite`, `better-sqlite3`), Postgres (anything
 with a node-postgres style `query`) and Supabase (a supabase-js client, through `rpc()` only). SQL
@@ -55,6 +57,53 @@ import pg from 'pg';
 import { Affiliates, postgresStore } from '@profullstack/affiliates';
 const aff = new Affiliates(postgresStore(new pg.Pool({ connectionString: process.env.DATABASE_URL })));
 ```
+
+## Multi-level commissions
+
+Start simple. With no `levels`, a sale pays the buyer's direct referrer 60% (`DEFAULT_SPLIT`), the
+same number `commission()` gives you:
+
+```ts
+const aff = new Affiliates(store);
+await aff.payouts('user_erin', 10_000);
+// { amountCents: 10000, discountCents: 2000, totalCents: 6000,
+//   lines: [{ affiliateId: 'user_alice', level: 1, rate: 0.6, cents: 6000 }] }
+```
+
+Grow into multi-level by passing one rate per generation. Level 1 is the direct referrer, level 2
+their referrer, and so on (up to `MAX_LEVELS` = 10):
+
+```ts
+const aff = new Affiliates(store, {
+  levels: [0.2, 0.05, 0.02],                 // 20% / 5% / 2% of each sale
+  eligible: (userId) => isActive(userId),    // optional: who may earn this month
+});
+const p = await aff.payouts(buyerId, amountCents);
+for (const line of p.lines) {
+  // record in YOUR ledger, keyed by purchase id + line.affiliateId, so a retry pays once
+  await ledger.credit(line.affiliateId, line.cents, { purchaseId, level: line.level });
+}
+
+await aff.upline(buyerId);       // [{ userId, level, via: 'link' | 'invite' }, ...] nearest first
+await aff.downline(userId, 3);   // [{ userId, level, at, parentId }, ...] breadth first, for a team page
+```
+
+The rules, all enforced by the package:
+
+- **The tree** is one parent per user: the affiliate link they arrived on (first touch), else the
+  person whose invite they redeemed. Nobody is ever re-parented.
+- **No loops.** `attribute()` returns `{ ok: false, cycle: true }` and `redeemInvite()` returns
+  `{ ok: false, reason: 'cycle' }` for a link that would put someone under their own downline, and
+  every walk also stops at a repeat, so bad legacy data can never pay anyone twice.
+- **It can never pay out more than the sale.** The constructor refuses a plan whose rates plus the
+  customer discount add up to more than 100%. Each line is rounded down.
+- **Ineligible means unpaid.** An ancestor that `eligible` rejects is skipped, and their share stays
+  with you. It is not passed further up (no compression). The walk carries on above them.
+- **Commissions come from sales only.** `payouts()` takes the amount a customer actually paid. There
+  is no way to pay for a sign-up or a recruit, and there should not be: paying for recruitment rather
+  than for real product sales is what turns a referral plan into a pyramid scheme.
+- **The package calculates and you pay.** `payouts()` writes nothing. Your app records the lines and
+  moves the money, so it fits whatever ledger and payout rails you already run.
 
 ## On Supabase
 
@@ -195,7 +244,14 @@ export class Affiliates {
   isExternalCode(code: string): Promise<boolean>;
   affiliateOf(userId: string): Promise<string | null>;
   commission(amountCents: number): { discountCents: number; commissionCents: number };
+  // 0.4.0: multi-level (see "Multi-level commissions")
+  readonly levels: readonly number[];                                // default [split.affiliate]
+  upline(userId: string, depth?: number): Promise<UplineEntry[]>;
+  downline(userId: string, depth?: number): Promise<DownlineEntry[]>;
+  payouts(buyerId: string, amountCents: number): Promise<Payouts>;
 }
+// new AffiliatesOptions: levels?: number[]; eligible?: (userId, level) => boolean | Promise<boolean>
+// new store method (optional for custom stores): attributedTo(affiliateId)
 export { buildReferralUrl, extractCode, calculateReferral, DEFAULT_SPLIT } from '@profullstack/referrals';
 export function normalizeCode(input: string): string;
 ```
@@ -224,6 +280,14 @@ Semantics worth knowing:
   ours but belongs to the site's @profullstack/referrals setup returns `{ ok: false, external: true }`.
 
 Tables (prefix configurable): `aff_invites`, `aff_quotas`, `aff_codes`, `aff_attributions`.
+
+## Upgrading from 0.3
+
+Nothing breaks. Without `levels`, every existing call behaves exactly as before. Two additions to
+result unions: `RedeemInviteResult` gains the reason `'cycle'` and `AttributeResult` gains
+`cycle?: true`. SQL stores need no schema change. On Supabase, apply
+`migrations/supabase-0.4.0-upgrade.sql` (one new function, `aff_attributed_to`, service_role only)
+or re-run `migrations/supabase.sql`. Until you do, `downline()` lists invitees only.
 
 ## Upgrading from 0.2
 

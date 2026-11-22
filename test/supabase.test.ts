@@ -216,6 +216,9 @@ describe('supabaseStore over rpc() on real Postgres', { skip: !PG_URL && 'set AF
       const c = fakeSupabase(pool, { prefix, role, migrate: false });
       const r = await c.rpc(`${prefix}get_quota`, { p_user: 'a' });
       assert.match(String(r.error?.message), /permission denied/);
+      // 0.4.0: the downline query is locked down the same way
+      const d = await c.rpc(`${prefix}attributed_to`, { p_affiliate: 'a' });
+      assert.match(String(d.error?.message), /permission denied/);
       const cl = await pool.connect();
       try {
         await cl.query('BEGIN');
@@ -238,7 +241,7 @@ describe('supabaseStore over rpc() on real Postgres', { skip: !PG_URL && 'set AF
       `SELECT proname, prosecdef, proconfig FROM pg_proc WHERE proname LIKE $1 AND pronamespace = 'public'::regnamespace`,
       [`${prefix}%`],
     );
-    assert.equal(fns.rows.length, 17);
+    assert.equal(fns.rows.length, 18); // 17 + attributed_to (0.4.0)
     for (const f of fns.rows) {
       assert.equal(f.prosecdef, true, f.proname);
       assert.deepEqual(f.proconfig, ['search_path=public, pg_temp'], f.proname);

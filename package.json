@@ -1,6 +1,6 @@
 {
   "name": "@profullstack/affiliates",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "type": "module",
   "description": "Scarce invite codes (per-user quota, single use, who-invited-whom) plus open affiliate links with first-touch attribution. Commission math and the referral_code cookie from @profullstack/referrals. Memory, SQLite (bun:sqlite, node:sqlite, better-sqlite3), Postgres and Supabase (supabase-js rpc) stores, plus a CLI.",
   "keywords": [
