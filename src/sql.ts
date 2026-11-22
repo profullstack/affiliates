@@ -246,5 +246,12 @@ export function sqlStore(exec: Exec, opts: SqlStoreOptions = {}, dialect: Dialec
       const r = rows[0];
       return r ? { userId: String(r.user_id), affiliateId: String(r.affiliate_id), code: String(r.code), at: Number(r.at) } : null;
     },
+    async attributedTo(affiliateId) {
+      const rows = await q(
+        `SELECT user_id, at FROM ${p}attributions WHERE affiliate_id = $1 ORDER BY at ASC, user_id`,
+        [affiliateId],
+      );
+      return rows.map((r) => ({ userId: String(r.user_id), at: Number(r.at) }));
+    },
   };
 }

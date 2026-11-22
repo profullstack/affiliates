@@ -222,6 +222,16 @@ AS $fn$
 SELECT * FROM public.aff_attributions WHERE user_id = p_user
 $fn$;
 
+CREATE OR REPLACE FUNCTION public.aff_attributed_to(p_affiliate TEXT)
+RETURNS TABLE (user_id TEXT, at BIGINT)
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $fn$
+SELECT user_id, at FROM public.aff_attributions
+  WHERE affiliate_id = p_affiliate ORDER BY at ASC, user_id
+$fn$;
+
 CREATE OR REPLACE FUNCTION public.aff_is_external_code(p_code TEXT)
 RETURNS BOOLEAN
 LANGUAGE plpgsql
@@ -255,6 +265,7 @@ REVOKE ALL ON FUNCTION public.aff_put_affiliate_code(TEXT, TEXT, BIGINT) FROM PU
 REVOKE ALL ON FUNCTION public.aff_affiliate_by_code(TEXT) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.aff_attribute(TEXT, TEXT, TEXT, BIGINT) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.aff_get_attribution(TEXT) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.aff_attributed_to(TEXT) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.aff_is_external_code(TEXT) FROM PUBLIC;
 
 DO $grants$
@@ -276,6 +287,7 @@ BEGIN
     REVOKE ALL ON FUNCTION public.aff_affiliate_by_code(TEXT) FROM anon;
     REVOKE ALL ON FUNCTION public.aff_attribute(TEXT, TEXT, TEXT, BIGINT) FROM anon;
     REVOKE ALL ON FUNCTION public.aff_get_attribution(TEXT) FROM anon;
+    REVOKE ALL ON FUNCTION public.aff_attributed_to(TEXT) FROM anon;
     REVOKE ALL ON FUNCTION public.aff_is_external_code(TEXT) FROM anon;
   END IF;
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
@@ -295,6 +307,7 @@ BEGIN
     REVOKE ALL ON FUNCTION public.aff_affiliate_by_code(TEXT) FROM authenticated;
     REVOKE ALL ON FUNCTION public.aff_attribute(TEXT, TEXT, TEXT, BIGINT) FROM authenticated;
     REVOKE ALL ON FUNCTION public.aff_get_attribution(TEXT) FROM authenticated;
+    REVOKE ALL ON FUNCTION public.aff_attributed_to(TEXT) FROM authenticated;
     REVOKE ALL ON FUNCTION public.aff_is_external_code(TEXT) FROM authenticated;
   END IF;
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'service_role') THEN
@@ -314,6 +327,7 @@ BEGIN
     GRANT EXECUTE ON FUNCTION public.aff_affiliate_by_code(TEXT) TO service_role;
     GRANT EXECUTE ON FUNCTION public.aff_attribute(TEXT, TEXT, TEXT, BIGINT) TO service_role;
     GRANT EXECUTE ON FUNCTION public.aff_get_attribution(TEXT) TO service_role;
+    GRANT EXECUTE ON FUNCTION public.aff_attributed_to(TEXT) TO service_role;
     GRANT EXECUTE ON FUNCTION public.aff_is_external_code(TEXT) TO service_role;
   END IF;
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
